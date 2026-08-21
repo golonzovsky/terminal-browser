@@ -557,6 +557,12 @@ export class BrowserController {
     return argv;
   }
 
+  // fraction of a viewport to travel, negative scrolls back up
+  scrollPage(fraction: number) {
+    if (this.stopped) return;
+    this.input.scrollBy(Math.round(this.contentSize(this.layout).height * fraction));
+  }
+
   private contentSize(layout: BrowserSurfaceLayout) {
     return cssSize(layout.width, layout.height, layout.scale);
   }

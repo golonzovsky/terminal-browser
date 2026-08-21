@@ -41,10 +41,54 @@ export class PageInput {
     return gate;
   }
 
+  private scrollTimer: ReturnType<typeof setInterval> | null = null;
+
   private send(event: SendableInputEvent) {
     const contents = this.target.contents();
     if (this.focusGate) void this.focusGate.then(() => contents.sendInputEvent(event));
     else contents.sendInputEvent(event);
+  }
+
+  // vim style page jumps ride an ease-out curve instead of teleporting, so you keep your place
+  scrollBy(pixels: number) {
+    this.syncFocus();
+    this.stopScroll();
+    const frames = 10;
+    let applied = 0;
+    let frame = 0;
+    this.scrollTimer = setInterval(() => {
+      frame += 1;
+      const eased = 1 - (1 - frame / frames) ** 3;
+      const target = pixels * eased;
+      const step = target - applied;
+      applied = target;
+      try {
+        if (step !== 0) {
+          this.send({
+            type: "mouseWheel",
+            x: this.lastX,
+            y: this.lastY,
+            deltaX: 0,
+            deltaY: -step,
+            wheelTicksX: 0,
+            wheelTicksY: -step / 40,
+            hasPreciseScrollingDeltas: true,
+            canScroll: true,
+            modifiers: [],
+          });
+        }
+      } catch {
+        this.stopScroll();
+        return;
+      }
+      if (frame >= frames) this.stopScroll();
+    }, SCROLL_FRAME_MS);
+  }
+
+  stopScroll() {
+    if (!this.scrollTimer) return;
+    clearInterval(this.scrollTimer);
+    this.scrollTimer = null;
   }
 
   releaseModifiers() {
@@ -352,6 +396,8 @@ const SELECTION_SNIPPET = `(() => {
 
 
 const WHEEL_DETENT_PX = process.platform === "darwin" ? 40 : 120;
+// ten frames of about eleven milliseconds, the same feel as fancy-cat
+const SCROLL_FRAME_MS = 11;
 
 function wholeDelta(value: number) {
   return value < 0 ? Math.ceil(value) : Math.floor(value);
