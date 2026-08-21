@@ -7,7 +7,12 @@ import type {
   WheelEvent,
 } from "pixel-react";
 import { normalizeUrl, urlHost } from "../url";
-import { allowClipboardRead, persistentPartition } from "./browser-session";
+import {
+  allowClipboardRead,
+  persistentPartition,
+  SCROLL_CHANNEL,
+  SCROLL_TO_CHANNEL,
+} from "./browser-session";
 import { cursorShapeFor } from "./cursor";
 import { DevtoolsWindow } from "./devtools";
 import type { DevtoolsAction } from "./devtools";
@@ -85,6 +90,7 @@ export class BrowserController {
   onDevtoolsAction: ((action: DevtoolsAction) => void) | null = null;
   onContextMenu: ((params: Electron.ContextMenuParams) => void) | null = null;
   onClosed: (() => void) | null = null;
+  onScroll: ((offset: number, size: number, viewport: number) => void) | null = null;
 
   constructor(
     surface: Surface,
@@ -199,6 +205,10 @@ export class BrowserController {
     });
     this.window.webContents.on("did-navigate-in-page", (_event, url, mainFrame) => {
       if (mainFrame) this.updateNavigation(this.state.loading, url);
+    });
+    this.window.webContents.on("ipc-message", (_event, channel, offset, size, viewport) => {
+      if (channel !== SCROLL_CHANNEL) return;
+      this.onScroll?.(Number(offset), Number(size), Number(viewport));
     });
     this.window.webContents.on("page-title-updated", (_event, title) => {
       this.updateState({ title });
@@ -546,6 +556,11 @@ export class BrowserController {
     const argv = [`--terminal-browser-session=${this.sessionKey}`];
     if (this.appTabId != null) argv.push(`--terminal-browser-app-tab=${this.appTabId}`);
     return argv;
+  }
+
+  scrollTo(offset: number) {
+    if (this.stopped) return;
+    this.window.webContents.send(SCROLL_TO_CHANNEL, Math.max(0, Math.round(offset)));
   }
 
   private contentSize(layout: BrowserSurfaceLayout) {

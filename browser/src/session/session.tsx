@@ -34,7 +34,7 @@ import type {
 import { RecordSession } from "../record/session";
 import type { RecordActions } from "../record/types";
 import { Registry } from "../registry";
-import { Chrome } from "../ui/chrome";
+import { Chrome, scrollHintGeometry } from "../ui/chrome";
 import { ICONS } from "../ui/icons";
 import type {
   ChromeActions,
@@ -43,6 +43,7 @@ import type {
   PageMenuItem,
   PageMenuView,
   PopupView,
+  ScrollView,
 } from "../ui/types";
 import { normalizeUrl, searchOrUrl } from "../url";
 import { fuzzyScore } from "./fuzzy";
@@ -83,6 +84,11 @@ export function createSession(ctx: SessionContext): SessionHandle {
     nudgeResize: () => session.nudgeResize(),
   };
 }
+
+const SCROLL_HINT_MS = 900;
+// fades out over roughly 150ms once scrolling stops
+const SCROLL_FADE_MS = 16;
+const SCROLL_FADE_STEP = 0.11;
 
 const DEFAULT_URL = "https://github.com/zenbu-labs";
 
@@ -258,6 +264,13 @@ class Session {
   private urlEditOpen = false;
   private palette: { query: string; index: number } | null = null;
   private newTab: NewTabState | null = null;
+  private scrollHint: { fraction: number; portion: number; alpha: number } | null = null;
+  private scrollSpan: { travel: number; portion: number } | null = null;
+  private scrollGrabbed = false;
+  private scrollGrabOffset = 0;
+  private scrollHovered = false;
+  private scrollHintTimer: ReturnType<typeof setTimeout> | null = null;
+  private scrollFade: ReturnType<typeof setInterval> | null = null;
   private zoomHud: number | null = null;
   private zoomHudTimer: ReturnType<typeof setTimeout> | null = null;
   private cellFollow: { height: number; basePx: number } | null = null;
@@ -301,8 +314,8 @@ class Session {
     configureBrowserSession(this.partition, (progress) => this.showDownload(progress));
     this.tabs = new TabManager(
       {
-        createController: (url, visible, onState, options) =>
-          new BrowserController(
+        createController: (url, visible, onState, options) => {
+          const controller = new BrowserController(
             this.root!.createSurface(),
             this.popupSurface!,
             this.devtoolsSurface!,
@@ -319,7 +332,11 @@ class Session {
               appTabId: options.app ? options.tabId : null,
             },
             onState,
-          ),
+          );
+          controller.onScroll = (offset, size, viewport) =>
+            this.noteScroll(controller, offset, size, viewport);
+          return controller;
+        },
         onActivated: () => {
           this.browserFocused = true;
           this.pageMenu = null;
@@ -714,6 +731,7 @@ class Session {
         noOverlays={this.sessionFlags.noOverlays || this.appTabActive()}
         popup={this.popupView()}
         zoomHud={this.zoomHud}
+        scroll={this.scrollView()}
         download={this.download}
         toast={this.toast}
         palette={
@@ -840,6 +858,8 @@ class Session {
         this.syncDevtoolsLayout({ keepFrame: true });
       }
     },
+    scrollDrag: (event) => this.dragScroll(event),
+    scrollHover: (hovering) => this.scrollHoverChanged(hovering),
     pageMenuAction: (id) => this.runPageMenu(id),
     pageMenuClose: () => this.closePageMenu(),
     record: this.recordActions(),
@@ -1126,6 +1146,109 @@ class Session {
     });
     if (active?.popup) hud = active.popup.scaleZoom(ratio);
     if (hud != null) this.showZoomHud(hud);
+  }
+
+  // shows the moment you scroll, then fades once the scrolling stops
+  private noteScroll(
+    controller: BrowserController,
+    offset: number,
+    size: number,
+    viewport: number,
+  ) {
+    if (controller !== this.tabs.activeController) return;
+    const portion = size > 0 ? Math.min(1, viewport / size) : 1;
+    if (portion >= 1) {
+      this.clearScrollHint();
+      return;
+    }
+    const travel = Math.max(1, size - viewport);
+    this.scrollSpan = { travel, portion };
+    const fraction = Math.min(1, Math.max(0, offset / travel));
+    const previous = this.scrollHint;
+    this.stopScrollFade();
+    this.scrollHint = { fraction, portion, alpha: 1 };
+    if (this.scrollHintTimer) clearTimeout(this.scrollHintTimer);
+    this.scrollHintTimer = setTimeout(() => {
+      this.scrollHintTimer = null;
+      if (!this.scrollHovered && !this.scrollGrabbed) this.fadeOutScrollHint();
+    }, SCROLL_HINT_MS);
+    const changed =
+      previous?.fraction !== fraction || previous?.portion !== portion || previous.alpha !== 1;
+    if (changed) this.render();
+  }
+
+  private fadeOutScrollHint() {
+    if (this.scrollFade || !this.scrollHint) return;
+    if (this.scrollHovered || this.scrollGrabbed) return;
+    this.scrollFade = setInterval(() => {
+      const hint = this.scrollHint;
+      if (!hint) {
+        this.stopScrollFade();
+        return;
+      }
+      const alpha = Math.max(0, hint.alpha - SCROLL_FADE_STEP);
+      this.scrollHint = { ...hint, alpha };
+      if (alpha === 0) this.stopScrollFade();
+      this.render();
+    }, SCROLL_FADE_MS);
+  }
+
+  private clearScrollHint() {
+    this.stopScrollFade();
+    if (this.scrollHintTimer) {
+      clearTimeout(this.scrollHintTimer);
+      this.scrollHintTimer = null;
+    }
+    if (!this.scrollHint) return;
+    this.scrollHint = null;
+    this.render();
+  }
+
+  private stopScrollFade() {
+    if (!this.scrollFade) return;
+    clearInterval(this.scrollFade);
+    this.scrollFade = null;
+  }
+
+  private scrollHoverChanged(hovering: boolean) {
+    if (this.scrollHovered === hovering) return;
+    this.scrollHovered = hovering;
+    if (hovering) {
+      this.stopScrollFade();
+      if (this.scrollHint) {
+        this.scrollHint = { ...this.scrollHint, alpha: 1 };
+        this.render();
+      }
+      return;
+    }
+    if (!this.scrollGrabbed && !this.scrollHintTimer) this.fadeOutScrollHint();
+  }
+
+  // dragging the thumb seeks the page directly rather than nudging it with wheel deltas
+  private dragScroll(event: DragEvent) {
+    const span = this.scrollSpan;
+    const layout = this.layout;
+    if (!span || !layout) return;
+    this.scrollGrabbed = event.phase !== "end";
+    const geometry = scrollHintGeometry(layout, span.portion);
+    const room = Math.max(1, geometry.track - geometry.thumb);
+    if (event.phase === "start") {
+      // hold onto where inside the thumb the press landed, so it does not jump under the cursor
+      const thumbTop = geometry.top + room * (this.scrollHint?.fraction ?? 0);
+      const within = event.y - thumbTop;
+      this.scrollGrabOffset =
+        within >= 0 && within <= geometry.thumb ? within : geometry.thumb / 2;
+    }
+    const top = event.y - this.scrollGrabOffset - geometry.top;
+    const fraction = Math.min(1, Math.max(0, top / room));
+    this.tabs.activeController?.scrollTo(fraction * span.travel);
+    if (event.phase === "end" && !this.scrollHovered) this.fadeOutScrollHint();
+  }
+
+  private scrollView(): ScrollView | null {
+    if (this.sessionFlags.noOverlays || this.appTabActive()) return null;
+    if (!this.scrollHint || this.scrollHint.alpha <= 0) return null;
+    return this.scrollHint;
   }
 
   private showZoomHud(factor: number) {
