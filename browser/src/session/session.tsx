@@ -1675,6 +1675,12 @@ class Session {
         ]
         : []),
       {
+        id: "zoom-reset",
+        label: "reset zoom",
+        shortcut: "",
+        run: () => this.applyZoom(0),
+      },
+      {
         id: "clear-all",
         label: this.clearAllArmed
           ? "clear every site — run again to confirm"
