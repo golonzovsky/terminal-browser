@@ -28,6 +28,7 @@ import type {
   PageMenuView,
   PaletteView,
   PopupView,
+  ScrollView,
   TabRow,
 } from "./types";
 
@@ -45,6 +46,7 @@ export function Chrome({
   noOverlays,
   popup,
   zoomHud,
+  scroll,
   download,
   toast,
   pageMenu,
@@ -68,6 +70,7 @@ export function Chrome({
   noOverlays: boolean;
   popup: PopupView | null;
   zoomHud: number | null;
+  scroll: ScrollView | null;
   download: DownloadView | null;
   toast: { text: string; detail?: string; failed: boolean; alert: boolean } | null;
   pageMenu: PageMenuView | null;
@@ -117,6 +120,8 @@ export function Chrome({
         agentActive={agentActive}
       />
       {agentActive && <AgentGlow layout={layout} theme={theme} intensity={glowPulse} />}
+      <ScrollEdge layout={layout} actions={actions} />
+      {scroll && <ScrollHint view={scroll} actions={actions} layout={layout} theme={theme} />}
       {layout.devtools && (
         <DevtoolsPane
           layout={layout}
@@ -332,6 +337,74 @@ function Toolbar({
   );
 }
 
+
+// shared with the session so a drag on the thumb maps back to a scroll offset
+export function scrollHintGeometry(layout: ChromeLayout, portion: number) {
+  const width = Math.max(3, Math.round(layout.rem * 0.28));
+  const inset = Math.max(2, Math.round(layout.rem * 0.2));
+  const track = Math.max(1, layout.page.height - inset * 2);
+  const thumb = Math.max(Math.round(layout.rem * 1.2), Math.round(track * portion));
+  return { width, inset, track, thumb, top: layout.page.y + inset };
+}
+
+// a cue that rides the right edge of the page, like the terminal's own overlay scrollbar
+function ScrollHint({
+  view,
+  actions,
+  layout,
+  theme,
+}: {
+  view: ScrollView;
+  actions: ChromeActions;
+  layout: ChromeLayout;
+  theme: Theme;
+}) {
+  const { width, inset, track, thumb, top } = scrollHintGeometry(layout, view.portion);
+  const y = top + Math.round((track - thumb) * view.fraction);
+  const grab = Math.max(8, Math.round(layout.rem * 0.7));
+  const right = layout.page.x + layout.page.width;
+  return (
+    <>
+      <Box
+        style={{
+          position: "absolute",
+          inset: { top: y, left: right - grab },
+          width: grab,
+          height: thumb,
+        }}
+        // clickable so the page surface below does not swallow the press before the drag starts
+        onClick={() => {}}
+        onDrag={actions.scrollDrag}
+      />
+      <Box
+        style={{
+          position: "absolute",
+          inset: { top: y, left: right - width - inset },
+          width,
+          height: thumb,
+          cornerRadius: width / 2,
+          background: withAlpha(theme.fg, Math.round(110 * view.alpha)),
+        }}
+      />
+    </>
+  );
+}
+
+// hover only, so it reveals the cue near the edge without swallowing clicks on the page
+function ScrollEdge({ layout, actions }: { layout: ChromeLayout; actions: ChromeActions }) {
+  return (
+    <Box
+      style={{
+        position: "absolute",
+        inset: { top: layout.page.y, left: layout.page.x + layout.page.width - layout.rem },
+        width: layout.rem,
+        height: layout.page.height,
+      }}
+      onMouseEnter={() => actions.scrollHover(true)}
+      onMouseLeave={() => actions.scrollHover(false)}
+    />
+  );
+}
 
 function seamRadius(radius: number, dock: "bottom" | "right" | null, side: "page" | "devtools") {
   if (!dock) return radius;

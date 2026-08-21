@@ -21,6 +21,9 @@ const GRANTED = new Set([
   "midi",
 ]);
 
+export const SCROLL_CHANNEL = "terminal-browser:scroll";
+export const SCROLL_TO_CHANNEL = "terminal-browser:scroll-to";
+
 const configured = new WeakSet<Session>();
 const clipboardReaders = new WeakSet<WebContents>();
 
@@ -29,6 +32,45 @@ webFrame.insertCSS("select, ::picker(select) { appearance: base-select !importan
   cssOrigin: "user",
 });
 `;
+
+// the terminal draws its own overlay indicator, so the real scrollbar would only steal a column
+const SCROLL_PRELOAD = `const { ipcRenderer, webFrame } = require("electron");
+
+webFrame.insertCSS(
+  "html { scrollbar-width: none } html::-webkit-scrollbar { width: 0; height: 0 }",
+  { cssOrigin: "user" },
+);
+
+if (window === window.top) {
+  let queued = false;
+  const report = () => {
+    queued = false;
+    const el = document.scrollingElement || document.documentElement;
+    if (el) ipcRenderer.send("${SCROLL_CHANNEL}", el.scrollTop, el.scrollHeight, el.clientHeight);
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(report);
+  };
+  ipcRenderer.on("${SCROLL_TO_CHANNEL}", (_event, top) => {
+    const el = document.scrollingElement || document.documentElement;
+    if (el) el.scrollTop = top;
+  });
+  addEventListener("scroll", schedule, { passive: true, capture: true });
+  addEventListener("resize", schedule, { passive: true });
+  addEventListener("load", schedule, { passive: true });
+}
+`;
+
+let scrollPreloadFile: string | null = null;
+function scrollPreloadPath(): string {
+  if (!scrollPreloadFile) {
+    scrollPreloadFile = path.join(app.getPath("userData"), "terminal-browser-scroll-preload.js");
+    fs.writeFileSync(scrollPreloadFile, SCROLL_PRELOAD);
+  }
+  return scrollPreloadFile;
+}
 
 let selectPreloadFile: string | null = null;
 function selectPreloadPath(): string {
@@ -59,6 +101,7 @@ export function configureBrowserSession(
   configured.add(target);
 
   target.registerPreloadScript({ type: "frame", filePath: selectPreloadPath() });
+  target.registerPreloadScript({ type: "frame", filePath: scrollPreloadPath() });
 
   target.setPermissionRequestHandler((contents, permission, callback) => {
     callback(granted(contents, permission));
