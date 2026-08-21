@@ -1091,6 +1091,13 @@ class Session {
           browser?.forward();
           return;
         }
+        if (event.mods.ctrl && !this.cmdHeld(event) && !event.mods.alt) {
+          const page = vimScroll(event.key, event.mods.shift);
+          if (page !== null) {
+            browser?.scrollPage(page);
+            return;
+          }
+        }
         if (this.cmdHeld(event)) {
           const direction = zoomDirection(event.key);
           if (direction !== null) {
@@ -1824,6 +1831,16 @@ function flagValue(argv: string[], flag: string): string | null {
   return (
     argv.find((argument) => argument.startsWith(`${flag}=`))?.slice(flag.length + 1) ?? null
   );
+}
+
+// ctrl+d / ctrl+u move half a screen, ctrl+f / ctrl+b a whole one, like vim
+function vimScroll(key: string, shift: boolean): number | null {
+  if (shift) return null;
+  if (key === "d") return 0.5;
+  if (key === "u") return -0.5;
+  if (key === "f") return 1;
+  if (key === "b") return -1;
+  return null;
 }
 
 function clearFailure(error: unknown): string {
