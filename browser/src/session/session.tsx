@@ -21,6 +21,7 @@ import {
 } from "../page/adblock";
 import {
   browserSession,
+  clearSiteData,
   configureBrowserSession,
   routeThroughSocksProxy,
 } from "../page/browser-session";
@@ -268,6 +269,7 @@ class Session {
   private findOpen = false;
   private urlEditOpen = false;
   private palette: { query: string; index: number } | null = null;
+  private clearAllArmed = false;
   private newTab: NewTabState | null = null;
   private zoomHud: number | null = null;
   private zoomHudTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1530,6 +1532,46 @@ class Session {
     chosen?.run();
   }
 
+  private pageOrigin(): string | null {
+    const url = this.tabs.activeState?.url ?? "";
+    if (!/^https?:\/\//i.test(url)) return null;
+    try {
+      return new URL(url).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  private clearSite(origin: string) {
+    void clearSiteData(this.partition, origin).then(
+      () => {
+        this.showToast(`cleared ${urlHost(origin)}`, "done");
+        this.tabs.activeController?.reload();
+      },
+      (error: unknown) => this.showToast(clearFailure(error), "failed"),
+    );
+  }
+
+  // wiping every site logs the user out of everything, so it takes two runs
+  private clearEverything() {
+    if (!this.clearAllArmed) {
+      this.clearAllArmed = true;
+      setTimeout(() => {
+        this.clearAllArmed = false;
+      }, 5000);
+      this.showToast("run again to clear every site", "alert");
+      return;
+    }
+    this.clearAllArmed = false;
+    void clearSiteData(this.partition).then(
+      () => {
+        this.showToast("cleared all site data", "done");
+        this.tabs.activeController?.reload();
+      },
+      (error: unknown) => this.showToast(clearFailure(error), "failed"),
+    );
+  }
+
   private adblockHost(): string | null {
     const url = this.tabs.activeState?.url ?? "";
     if (!this.adblock || !/^https?:\/\//i.test(url)) return null;
@@ -1575,6 +1617,7 @@ class Session {
 
   private paletteActions(): PaletteAction[] {
     const adblockHost = this.adblockHost();
+    const origin = this.pageOrigin();
     return [
       {
         id: "find",
@@ -1621,6 +1664,24 @@ class Session {
           },
         ]
         : []),
+      ...(origin
+        ? [
+          {
+            id: "clear-site",
+            label: `clear cookies and data for ${urlHost(origin)}`,
+            shortcut: "",
+            run: () => this.clearSite(origin),
+          },
+        ]
+        : []),
+      {
+        id: "clear-all",
+        label: this.clearAllArmed
+          ? "clear every site — run again to confirm"
+          : "clear cookies and data for all sites",
+        shortcut: "",
+        run: () => this.clearEverything(),
+      },
       {
         id: "devtools",
         label: this.tabs.activeController?.devtools ? "close devtools" : "open devtools",
@@ -1757,6 +1818,10 @@ function flagValue(argv: string[], flag: string): string | null {
   return (
     argv.find((argument) => argument.startsWith(`${flag}=`))?.slice(flag.length + 1) ?? null
   );
+}
+
+function clearFailure(error: unknown): string {
+  return `clearing failed: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 function filterAgeLabel(): string {
