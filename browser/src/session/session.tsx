@@ -35,7 +35,16 @@ import { initialBrowserState } from "../page/types";
 import type { BrowserState, BrowserSurfaceLayout } from "../page/types";
 import { zoomDirection } from "../page/zoom";
 import type { ZoomDirection } from "../page/zoom";
-import { appId, lastUrl, listApps, setLastUrl, settings, store } from "pixel-store";
+import {
+  appId,
+  lastUrl,
+  listApps,
+  resumeSession,
+  saveResumeSession,
+  setLastUrl,
+  settings,
+  store,
+} from "pixel-store";
 import type {
   DevtoolsDock,
   InstanceRow,
@@ -77,7 +86,7 @@ export interface SessionContext {
   env: NodeJS.ProcessEnv;
   cwd: string;
   cdpPort: number | null;
-  onClose(code: number): void;
+  onClose(code: number, resume?: string | null): void;
 }
 
 export interface SessionHandle {
@@ -464,7 +473,7 @@ class Session {
     this.installEmbedderApi();
     if (this.appIdentity) {
       this.tabs.create(this.fallbackState.url, true, { app: this.appIdentity });
-    } else {
+    } else if (!this.restoreTabs()) {
       this.tabs.create(this.fallbackState.url);
     }
     this.registry = new Registry({
@@ -622,6 +631,7 @@ class Session {
         browserSession(partition).flushStorageData();
       } catch { }
     }
+    const resume = this.saveTabsForResume();
     this.registry?.dispose();
     this.registry = null;
     this.tabs.stopAll();
@@ -630,7 +640,42 @@ class Session {
       this.devtoolsSurface?.close();
     } catch { }
     this.root?.stop();
-    this.ctx.onClose(code);
+    this.ctx.onClose(code, resume);
+  }
+
+  private restoreTabs(): boolean {
+    const id = flagValue(this.argv, "--resume");
+    if (!id) return false;
+    const saved = (() => {
+      try {
+        return resumeSession(id);
+      } catch {
+        return null;
+      }
+    })();
+    if (!saved || saved.tabs.length === 0) {
+      this.tabs.create(this.fallbackState.url);
+      this.showToast(`no saved session ${id}`, "failed");
+      return true;
+    }
+    for (const tab of saved.tabs) {
+      this.tabs.create(tab.url, tab.active);
+    }
+    return true;
+  }
+
+  // a snapshot of where you were, so the next shell can pick the tabs back up
+  private saveTabsForResume(): string | null {
+    if (this.appIdentity) return null;
+    try {
+      const tabs = this.tabs
+        .registryView()
+        .filter((tab) => !tab.app && /^(https?|file):/i.test(tab.url))
+        .map((tab) => ({ url: tab.url, title: tab.title, active: tab.active }));
+      return saveResumeSession(tabs);
+    } catch {
+      return null;
+    }
   }
 
   nudgeResize() {

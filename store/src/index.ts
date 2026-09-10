@@ -16,6 +16,8 @@ export { appState, instances, settings } from "./schema";
 export type { DevtoolsDock, InstanceRow, NewInstanceRow, SettingsRow } from "./schema";
 export { listInstances, removeInstance, upsertInstance } from "./instances";
 export { lastUrl, setLastUrl } from "./app-state";
+export { listResumeSessions, resumeSession, saveResumeSession } from "./resume";
+export type { ResumeSession, ResumeTab } from "./resume";
 export {
   INTEROP_APPS_DIR,
   INTEROP_INSTANCES_DIR,

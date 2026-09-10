@@ -109,9 +109,9 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
               env: message.env ?? {},
               cwd: message.cwd ?? process.cwd(),
               cdpPort,
-              onClose: (code) => {
+              onClose: (code, resume) => {
                 sessions.delete(sessionKey);
-                reply({ event: "closed", code });
+                reply({ event: "closed", code, resume: resume ?? undefined });
                 connection.end();
                 scheduleIdleExit();
               },
