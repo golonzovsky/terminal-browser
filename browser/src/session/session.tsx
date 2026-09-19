@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
 
 import { app } from "electron";
@@ -1327,7 +1328,22 @@ class Session {
         shortcut: "",
         run: () => this.launchApp(app),
       })),
+      ...(this.ctx.env.TERMINAL_BROWSER_DEV_SOCKET
+        ? [
+          {
+            id: "dev-reload",
+            label: "reload instance",
+            shortcut: "",
+            run: () => this.requestDevReload(this.ctx.env.TERMINAL_BROWSER_DEV_SOCKET!),
+          },
+        ]
+        : []),
     ];
+  }
+
+  private requestDevReload(socketPath: string) {
+    const connection = net.connect(socketPath, () => connection.end("reload\n"));
+    connection.on("error", () => {});
   }
 
   private filteredPalette(): PaletteAction[] {
