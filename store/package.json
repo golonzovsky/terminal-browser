@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.json && node --test \"test/*.test.js\"",
     "db:generate": "drizzle-kit generate && tsx scripts/embed-migrations.ts"
   },
   "dependencies": {
@@ -15,6 +16,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@zenbu-labs/pixel": "0.0.15",
     "drizzle-kit": "0.31.5",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"

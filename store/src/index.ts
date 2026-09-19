@@ -32,3 +32,4 @@ export {
   withdrawInstance,
 } from "./interop";
 export type { InteropInstance, OpenResult, OpenSpec, RegisteredApp } from "./interop";
+export { TERMINAL_SOCKET_ENV, TERMINAL_SOCKET_PROTOCOL, socketTerminal } from "./terminal-socket";

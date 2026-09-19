@@ -20,7 +20,7 @@ import { AgentPaneFinder } from "../grab/target";
 import type { EmbeddedAgent } from "../grab/target";
 import { zoomDirection } from "../zoom";
 import type { ZoomDirection } from "../zoom";
-import { lastUrl, listApps, setLastUrl, settings, store } from "pixel-store";
+import { TERMINAL_SOCKET_ENV, lastUrl, listApps, setLastUrl, settings, socketTerminal, store } from "pixel-store";
 import type { InstanceRow, RegisteredApp } from "pixel-store";
 
 import type { RecordTarget } from "../record/recorder";
@@ -221,7 +221,8 @@ class Session {
   constructor(ctx: SessionContext) {
     this.ctx = ctx;
     this.defaultUrl = ctx.env.TERMINAL_BROWSER_START_PAGE === "1" ? START_URL : "about:blank";
-    this.terminal = detect(ctx.env);
+    const socket = ctx.env[TERMINAL_SOCKET_ENV];
+    this.terminal = socket ? socketTerminal(socket) : detect(ctx.env);
     this.marker = `terminal-browser:${ctx.key}`;
     this.argv = ctx.argv;
     this.agentPanes = new AgentPaneFinder({

@@ -7,11 +7,13 @@ import path from "node:path";
 import {
   DAEMON_SOCKET,
   LOGS_DIR,
+  TERMINAL_SOCKET_ENV,
   appId,
   ensureDataDir,
   instanceKey,
   listApps,
   registerApp,
+  socketTerminal,
   unregisterApp,
 } from "pixel-store";
 import {
@@ -429,7 +431,8 @@ async function launchInSplit(
 let asked: Promise<TerminalCheck> | null = null;
 
 function currentTerminal(): Promise<TerminalCheck> {
-  asked ??= checkTerminal(detect());
+  const socket = process.env[TERMINAL_SOCKET_ENV];
+  asked ??= checkTerminal(socket ? socketTerminal(socket) : detect());
   return asked;
 }
 

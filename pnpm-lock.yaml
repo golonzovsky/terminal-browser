@@ -80,6 +80,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      '@zenbu-labs/pixel':
+        specifier: 0.0.15
+        version: 0.0.15(react@18.3.1)
       drizzle-kit:
         specifier: 0.31.5
         version: 0.31.5
