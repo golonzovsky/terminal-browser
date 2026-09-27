@@ -7,6 +7,7 @@ import { createRoot, initialWebViewState } from "@zenbu-labs/pixel";
 import type {
   DevtoolsDock,
   DownloadProgress,
+  DragEvent,
   EngineKeyEvent,
   Root,
   WebViewHandle,
@@ -25,6 +26,8 @@ import {
   listApps,
   listStep,
   maxFps,
+  resumeSession,
+  saveResumeSession,
   renderEnv,
   setLastUrl,
   settings as settingsTable,
@@ -54,8 +57,9 @@ import type { RecordTarget } from "../record/recorder";
 import { RecordSession } from "../record/session";
 import type { RecordActions } from "../record/types";
 import { Registry } from "../registry";
-import { Chrome } from "../ui/chrome";
+import { Chrome, scrollHintGeometry } from "../ui/chrome";
 import type {
+  AdblockView,
   ChromeActions,
   ChromeLayout,
   DevtoolsView,
@@ -63,12 +67,28 @@ import type {
   NewTabSuggestion,
   PageMenuItem,
   PageMenuView,
+  ScrollView,
   TabActions,
   TabView,
   ToastView,
   ReleaseView,
 } from "../ui/types";
-import { displayUrl, normalizeUrl, searchOrUrl, searchUrlFor } from "../url";
+import {
+  adblockBlocked,
+  adblockClosePage,
+  adblockFiltersAge,
+  adblockHostAllowed,
+  adblockOn,
+  adblockOpenPage,
+  adblockPageNavigated,
+  adblockUpdating,
+  attachAdblockPreloads,
+  attachAdblockRequests,
+  setAdblockHostAllowed,
+  setAdblockOn,
+  updateAdblockFilters,
+} from "../page/adblock";
+import { displayUrl, normalizeUrl, searchOrUrl, searchUrlFor, urlHost } from "../url";
 import type { SearchUrl } from "../url";
 import { HOME_URL, START_URL } from "../pages/scheme";
 import type { PageContext } from "../pages/scheme";
@@ -79,6 +99,7 @@ import { fuzzyScore } from "./fuzzy";
 import { PermissionPrompts } from "./permissions";
 import type { MediaDevice } from "./permissions";
 import { clampDevtoolsFraction, computeLayout, dividerFraction, recordBarHeight } from "./layout";
+import { attachPageScroll, onPageScroll, scrollPageBy, scrollPageTo } from "./page-scroll";
 
 // Installed builds run from a dist root; anything else is a source checkout.
 const DEV_BUILD = !process.env.TERMINAL_BROWSER_DIST_ROOT;
@@ -104,7 +125,7 @@ export interface SessionContext {
   env: NodeJS.ProcessEnv;
   cwd: string;
   cdpPort: number | null;
-  onClose(code: number): void;
+  onClose(code: number, resume?: string | null): void;
 }
 
 export interface SessionHandle {
@@ -174,6 +195,11 @@ interface ClearDataState {
   clearing: boolean;
 }
 
+const SCROLL_HINT_MS = 900;
+// fades out over roughly 150ms once scrolling stops
+const SCROLL_FADE_MS = 16;
+const SCROLL_FADE_STEP = 0.11;
+
 class Session {
   private readonly ctx: SessionContext;
   private readonly terminal: Terminal | null;
@@ -221,6 +247,7 @@ class Session {
   private surfaceLayout: SurfaceLayout | null = null;
 
   private shuttingDown = false;
+  private resumeId: string | null = null;
   private devtoolsDockSide: DevtoolsDock = "bottom";
   private devtoolsFraction = 0.4;
   private devtoolsPanel: string | null = null;
@@ -244,7 +271,17 @@ class Session {
   private findOpen = false;
   private urlEditOpen = false;
   private palette: { query: string; index: number } | null = null;
+  private readonly adblock: boolean;
+  private readonly adblockPages = new Map<number, string>();
+  private readonly scrollPages = new Set<number>();
   private newTab: NewTabState | null = null;
+  private scrollHint: { fraction: number; portion: number; alpha: number } | null = null;
+  private scrollSpan: { travel: number; portion: number } | null = null;
+  private scrollGrabbed = false;
+  private scrollGrabOffset = 0;
+  private scrollHovered = false;
+  private scrollHintTimer: ReturnType<typeof setTimeout> | null = null;
+  private scrollFade: ReturnType<typeof setInterval> | null = null;
   private zoomHud: number | null = null;
   private zoomHudTimer: ReturnType<typeof setTimeout> | null = null;
   private download: DownloadView | null = null;
@@ -280,6 +317,7 @@ class Session {
       self: () => this.findOwnPane(),
       embedded: embeddedAgent(ctx.env.TERMINAL_BROWSER_AGENT_BRIDGE, ctx.env.TERMINAL_BROWSER_AGENT_TOKEN),
     });
+    this.adblock = !this.argv.includes("--no-adblock");
     this.sessionFlags = {
       clipboardRead: this.argv.includes("--allow-clipboard-read"),
       transparent: this.argv.includes("--transparent"),
@@ -288,6 +326,9 @@ class Session {
     const socksPort = Number(flagValue(this.argv, "--socks-port"));
     this.socksPort = Number.isInteger(socksPort) && socksPort > 0 ? socksPort : null;
     this.partition = sshTarget ? `ssh-${sshTarget.replace(/[^A-Za-z0-9@._-]/g, "-")}` : null;
+    const pageSession = browsingSession(this.partition);
+    attachPageScroll(pageSession);
+    if (this.adblock) attachAdblockPreloads(pageSession);
     this.fallbackState = initialWebViewState(this.initialUrl());
     this.copyOnSelect = ctx.env.TERMINAL_BROWSER_COPY_ON_SELECT === "1";
     this.browserPreload = reactGrabPreloadPath(this.copyOnSelect);
@@ -364,13 +405,13 @@ class Session {
         this.render();
       },
       onQuit: () => this.shutdown(),
-      onExit: (code) => this.ctx.onClose(code),
+      onExit: (code) => this.ctx.onClose(code, this.resumeId),
     });
     this.settings.setNoSuper(!this.root.info.kittyKeyboard);
     this.applyRenderSettings();
     this.settings.watch();
     this.recalculateLayout();
-    this.tabs.create(this.fallbackState.url);
+    if (!this.restoreTabs()) this.tabs.create(this.fallbackState.url);
     this.registry = new Registry({
       key: this.ctx.key,
       tty: this.ctx.tty ?? null,
@@ -445,6 +486,7 @@ class Session {
   shutdown(code = 0) {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    this.resumeId = this.saveTabsForResume();
     for (const record of this.records.values()) record.dispose();
     this.records.clear();
     this.shownRecord = null;
@@ -453,7 +495,41 @@ class Session {
     this.settings.dispose();
     this.tabs.stopAll();
     if (this.root) this.root.stop(code);
-    else this.ctx.onClose(code);
+    else this.ctx.onClose(code, this.resumeId);
+  }
+
+  private restoreTabs(): boolean {
+    const id = flagValue(this.argv, "--resume");
+    if (!id) return false;
+    const saved = (() => {
+      try {
+        return resumeSession(id);
+      } catch {
+        return null;
+      }
+    })();
+    if (!saved || saved.tabs.length === 0) {
+      this.tabs.create(this.fallbackState.url);
+      this.showToast(`no saved session ${id}`, "failed");
+      return true;
+    }
+    for (const tab of saved.tabs) {
+      this.tabs.create(tab.url, tab.active);
+    }
+    return true;
+  }
+
+  // a snapshot of where you were, so the next shell can pick the tabs back up
+  private saveTabsForResume(): string | null {
+    try {
+      const tabs = this.tabs
+        .registryView()
+        .filter((tab) => /^(https?|file):/i.test(tab.url))
+        .map((tab) => ({ url: tab.url, title: tab.title, active: tab.active }));
+      return saveResumeSession(tabs);
+    } catch {
+      return null;
+    }
   }
 
   nudgeResize() {
@@ -501,7 +577,10 @@ class Session {
   }
 
   private readonly tabActions: TabActions = {
-    state: (id, state) => this.tabs.stateChanged(id, state),
+    state: (id, state) => {
+      this.tabs.stateChanged(id, state);
+      this.trackPage(id, state.url);
+    },
     openWindow: (id, details) => this.tabs.openWindow(id, details),
     contextMenu: (id, params) => this.tabs.contextMenu(id, params),
     download: (progress) => this.showDownload(progress),
@@ -539,6 +618,78 @@ class Session {
     return false;
   }
 
+  private adblockHost(): string | null {
+    const url = this.tabs.activeState?.url ?? "";
+    if (!this.adblock || !/^https?:\/\//i.test(url)) return null;
+    return urlHost(url) || null;
+  }
+
+  private adblockView(): AdblockView | null {
+    const host = this.adblockHost();
+    if (!host) return null;
+    const contents = this.tabs.active?.ref.current?.webContents;
+    return {
+      active: adblockOn() && !adblockHostAllowed(host),
+      blocked: adblockBlocked(contents && !contents.isDestroyed() ? contents.id : null),
+    };
+  }
+
+  private toggleAdblockForHost() {
+    const host = this.adblockHost();
+    if (!host) return;
+    const allowed = !adblockHostAllowed(host);
+    setAdblockHostAllowed(host, allowed);
+    this.showToast(allowed ? `ads allowed on ${host}` : `ads blocked on ${host}`, "done");
+    this.tabs.activeHandle?.reload();
+    this.render();
+  }
+
+  private toggleAdblock() {
+    const on = !adblockOn();
+    setAdblockOn(on);
+    this.showToast(on ? "ad blocking on" : "ad blocking off", "done");
+    this.tabs.activeHandle?.reload();
+    this.render();
+  }
+
+  private updateFilters() {
+    if (adblockUpdating()) return;
+    this.showToast("updating filters", "done");
+    this.render();
+    void updateAdblockFilters().then((updated) => {
+      this.showToast(updated ? "filters updated" : "filter update failed", updated ? "done" : "failed");
+      this.render();
+    });
+  }
+
+  // the engine owns the webview now, so pages are tracked from their state changes
+  private trackPage(id: number, url: string) {
+    const contents = this.tabs.get(id)?.ref.current?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    attachPageScroll(contents.session);
+    if (!this.scrollPages.has(contents.id)) {
+      this.scrollPages.add(contents.id);
+      onPageScroll(contents, (offset, size, viewport) =>
+        this.noteScroll(contents.id, offset, size, viewport),
+      );
+      contents.once("destroyed", () => this.scrollPages.delete(contents.id));
+    }
+    if (!this.adblock) return;
+    attachAdblockRequests(contents.session);
+    const key = contents.id;
+    if (!this.adblockPages.has(key)) {
+      this.adblockPages.set(key, "");
+      adblockOpenPage(key, true, () => this.render());
+      contents.once("destroyed", () => {
+        adblockClosePage(key);
+        this.adblockPages.delete(key);
+      });
+    }
+    if (this.adblockPages.get(key) === url) return;
+    this.adblockPages.set(key, url);
+    adblockPageNavigated(key, urlHost(url));
+  }
+
   private render() {
     if (!this.root || !this.layout) return;
     this.root.render(
@@ -556,6 +707,7 @@ class Session {
         }
         urlEdit={this.urlEditOpen}
         zoomHud={this.zoomHud}
+        scroll={this.scrollView()}
         download={this.download}
         toast={this.toast}
         palette={
@@ -581,6 +733,7 @@ class Session {
             }
             : null
         }
+        adblock={this.adblockView()}
         dividerEngaged={this.dividerHover || this.dividerDragging}
         record={this.activeRecord()?.view() ?? null}
         recordSurface={this.activeRecord()?.surface ?? null}
@@ -685,6 +838,9 @@ class Session {
       if (action === "close") this.closeDevtools();
       else this.setDevtoolsDockSide(action === "dock-bottom" ? "bottom" : "right");
     },
+    scrollDrag: (event) => this.dragScroll(event),
+    scrollHover: (hovering) => this.scrollHoverChanged(hovering),
+    adblockToggle: () => this.toggleAdblockForHost(),
     pageMenuAction: (id) => this.runPageMenu(id),
     pageMenuClose: () => this.closePageMenu(),
     pageMenuZoom: (direction) => this.applyZoom(direction),
@@ -953,6 +1109,21 @@ class Session {
       case "page.forward":
         handle?.forward();
         return;
+      case "page.scroll.down":
+        this.scrollPage(0.5);
+        return;
+      case "page.scroll.up":
+        this.scrollPage(-0.5);
+        return;
+      case "page.scroll.screen-down":
+        this.scrollPage(1);
+        return;
+      case "page.scroll.screen-up":
+        this.scrollPage(-1);
+        return;
+      case "adblock.toggle":
+        this.toggleAdblock();
+        return;
       case "devtools.toggle":
         this.toggleDevtools();
         return;
@@ -1002,6 +1173,118 @@ class Session {
     this.uiZoom = Math.min(3, Math.max(0.5, Number(next.toFixed(3))));
     this.recalculateLayout();
     this.render();
+  }
+
+  // shows the moment you scroll, then fades once the scrolling stops
+  private noteScroll(contentsId: number, offset: number, size: number, viewport: number) {
+    const active = this.tabs.activeHandle?.webContents;
+    if (!active || active.isDestroyed() || active.id !== contentsId) return;
+    const portion = size > 0 ? Math.min(1, viewport / size) : 1;
+    if (portion >= 1) {
+      this.clearScrollHint();
+      return;
+    }
+    const travel = Math.max(1, size - viewport);
+    this.scrollSpan = { travel, portion };
+    const fraction = Math.min(1, Math.max(0, offset / travel));
+    const previous = this.scrollHint;
+    this.stopScrollFade();
+    this.scrollHint = { fraction, portion, alpha: 1 };
+    if (this.scrollHintTimer) clearTimeout(this.scrollHintTimer);
+    this.scrollHintTimer = setTimeout(() => {
+      this.scrollHintTimer = null;
+      if (!this.scrollHovered && !this.scrollGrabbed) this.fadeOutScrollHint();
+    }, SCROLL_HINT_MS);
+    const changed =
+      previous?.fraction !== fraction || previous?.portion !== portion || previous.alpha !== 1;
+    if (changed) this.render();
+  }
+
+  private fadeOutScrollHint() {
+    if (this.scrollFade || !this.scrollHint) return;
+    if (this.scrollHovered || this.scrollGrabbed) return;
+    this.scrollFade = setInterval(() => {
+      const hint = this.scrollHint;
+      if (!hint) {
+        this.stopScrollFade();
+        return;
+      }
+      const alpha = Math.max(0, hint.alpha - SCROLL_FADE_STEP);
+      this.scrollHint = { ...hint, alpha };
+      if (alpha === 0) this.stopScrollFade();
+      this.render();
+    }, SCROLL_FADE_MS);
+  }
+
+  private clearScrollHint() {
+    this.stopScrollFade();
+    if (this.scrollHintTimer) {
+      clearTimeout(this.scrollHintTimer);
+      this.scrollHintTimer = null;
+    }
+    if (!this.scrollHint) return;
+    this.scrollHint = null;
+    this.render();
+  }
+
+  private stopScrollFade() {
+    if (!this.scrollFade) return;
+    clearInterval(this.scrollFade);
+    this.scrollFade = null;
+  }
+
+  private scrollHoverChanged(hovering: boolean) {
+    if (this.scrollHovered === hovering) return;
+    this.scrollHovered = hovering;
+    if (hovering) {
+      this.stopScrollFade();
+      if (this.scrollHint) {
+        this.scrollHint = { ...this.scrollHint, alpha: 1 };
+        this.render();
+      }
+      return;
+    }
+    if (!this.scrollGrabbed && !this.scrollHintTimer) this.fadeOutScrollHint();
+  }
+
+  // dragging the thumb seeks the page directly rather than nudging it with wheel deltas
+  private dragScroll(event: DragEvent) {
+    const span = this.scrollSpan;
+    const layout = this.layout;
+    const contents = this.tabs.activeHandle?.webContents;
+    if (!span || !layout || !contents) return;
+    this.scrollGrabbed = event.phase !== "end";
+    const geometry = scrollHintGeometry(layout, span.portion);
+    const room = Math.max(1, geometry.track - geometry.thumb);
+    if (event.phase === "start") {
+      // hold onto where inside the thumb the press landed, so it does not jump under the cursor
+      const thumbTop = geometry.top + room * (this.scrollHint?.fraction ?? 0);
+      const within = event.y - thumbTop;
+      this.scrollGrabOffset =
+        within >= 0 && within <= geometry.thumb ? within : geometry.thumb / 2;
+    }
+    const top = event.y - this.scrollGrabOffset - geometry.top;
+    const fraction = Math.min(1, Math.max(0, top / room));
+    scrollPageTo(contents, fraction * span.travel);
+    if (event.phase === "end" && !this.scrollHovered) this.fadeOutScrollHint();
+  }
+
+  private scrollView(): ScrollView | null {
+    if (!this.scrollHint || this.scrollHint.alpha <= 0) return null;
+    return this.scrollHint;
+  }
+
+  // fraction of a viewport to travel, negative scrolls back up
+  private scrollPage(fraction: number) {
+    const contents = this.tabs.activeHandle?.webContents;
+    const surface = this.surfaceLayout;
+    if (!contents || contents.isDestroyed() || !surface) return;
+    const width = Math.max(1, Math.floor(surface.width / surface.scale));
+    const height = Math.max(1, Math.floor(surface.height / surface.scale));
+    scrollPageBy(contents, Math.round(height * fraction), {
+      x: Math.round(width / 2),
+      y: Math.round(height / 2),
+    });
   }
 
   private showZoomHud(factor: number) {
@@ -1585,6 +1868,7 @@ class Session {
 
   private paletteActions(): PaletteAction[] {
     const devtoolsOpen = this.tabs.active?.devtools ?? false;
+    const adblockHost = this.adblockHost();
     const command = (id: CommandId): PaletteAction => ({
       id,
       label: this.paletteLabel(id),
@@ -1596,6 +1880,25 @@ class Session {
       command("tab.next"),
       command("tab.previous"),
       command("record.toggle"),
+      ...(adblockHost
+        ? [
+          {
+            id: "adblock-site",
+            label: adblockHostAllowed(adblockHost)
+              ? `block ads on ${adblockHost}`
+              : `allow ads on ${adblockHost}`,
+            shortcut: "",
+            run: () => this.toggleAdblockForHost(),
+          },
+          command("adblock.toggle"),
+          {
+            id: "adblock-update",
+            label: adblockUpdating() ? "updating filters…" : `update filters${filterAgeLabel()}`,
+            shortcut: "",
+            run: () => this.updateFilters(),
+          },
+        ]
+        : []),
       command("grab.toggle"),
       command("devtools.toggle"),
       { id: "clear-data", label: CLEAR_DATA_LABEL, shortcut: "", run: () => this.openClearData() },
@@ -1671,6 +1974,8 @@ class Session {
       }
       case "grab.toggle":
         return this.activeGrab()?.active ? "Stop selection" : "Send to agent";
+      case "adblock.toggle":
+        return adblockOn() ? "Turn off ad blocking" : "Turn on ad blocking";
       case "devtools.toggle":
         return this.tabs.active?.devtools ? "Close devtools" : "Open devtools";
       default:
@@ -1751,6 +2056,15 @@ function flagValue(argv: string[], flag: string): string | null {
   return (
     argv.find((argument) => argument.startsWith(`${flag}=`))?.slice(flag.length + 1) ?? null
   );
+}
+
+function filterAgeLabel(): string {
+  const age = adblockFiltersAge();
+  if (age === null) return "";
+  const hours = Math.floor(age / 3600000);
+  if (hours < 1) return " (updated just now)";
+  if (hours < 24) return ` (${hours}h old)`;
+  return ` (${Math.floor(hours / 24)}d old)`;
 }
 
 function rememberUrl(url: string) {
