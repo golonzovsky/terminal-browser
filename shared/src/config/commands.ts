@@ -20,6 +20,11 @@ export const COMMANDS = {
   "page.reload": { label: "Reload page", keys: platform(["cmd+r"], ["ctrl+r"]) },
   "page.back": { label: "Back", keys: platform(["cmd+[", "ctrl+["], ["ctrl+["]) },
   "page.forward": { label: "Forward", keys: platform(["cmd+]", "ctrl+]"], ["ctrl+]"]) },
+  "page.scroll.down": { label: "Scroll half a screen down", keys: shared(["ctrl+d"]) },
+  "page.scroll.up": { label: "Scroll half a screen up", keys: shared(["ctrl+u"]) },
+  "page.scroll.screen-down": { label: "Scroll a screen down", keys: shared(["ctrl+f"]) },
+  "page.scroll.screen-up": { label: "Scroll a screen up", keys: shared(["ctrl+b"]) },
+  "adblock.toggle": { label: "Turn off ad blocking", keys: shared([]) },
   "devtools.toggle": {
     label: "Toggle devtools",
     keys: platform(["cmd+shift+i", "f12"], ["ctrl+shift+i", "f12"]),

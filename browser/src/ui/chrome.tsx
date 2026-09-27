@@ -21,6 +21,7 @@ import type { Theme } from "./theme";
 import { usePulse } from "./pulse";
 import type { RecordView } from "../record/types";
 import type {
+  AdblockView,
   ChromeActions,
   ChromeLayout,
   DownloadView,
@@ -30,6 +31,7 @@ import type {
   PaletteView,
   SettingsView,
   ToastView,
+  ScrollView,
   TabActions,
   TabRow,
   TabView,
@@ -47,10 +49,12 @@ export function Chrome({
   newTab,
   urlEdit,
   zoomHud,
+  scroll,
   download,
   toast,
   pageMenu,
   settings,
+  adblock,
   dividerEngaged,
   record,
   recordSurface,
@@ -71,10 +75,12 @@ export function Chrome({
   newTab: NewTabView | null;
   urlEdit: boolean;
   zoomHud: number | null;
+  scroll: ScrollView | null;
   download: DownloadView | null;
   toast: ToastView | null;
   pageMenu: PageMenuView | null;
   settings: SettingsView | null;
+  adblock: AdblockView | null;
   dividerEngaged: boolean;
   record: RecordView | null;
   recordSurface: Surface | null;
@@ -113,6 +119,7 @@ export function Chrome({
             record={record}
             profiling={profiling}
             grabActive={grabActive}
+            adblock={adblock}
           />
         ))}
       <BrowserTabContents
@@ -124,6 +131,8 @@ export function Chrome({
         coveredByReview={record?.canvas != null}
       />
       {agentActive && <AgentGlow layout={layout} theme={theme} intensity={glowPulse} />}
+      <ScrollEdge layout={layout} actions={actions} />
+      {scroll && <ScrollHint view={scroll} actions={actions} layout={layout} theme={theme} />}
       {layout.devtools && devtools && (
         <DevtoolsPane
           layout={layout}
@@ -271,6 +280,7 @@ function Toolbar({
   record,
   profiling,
   grabActive,
+  adblock,
 }: {
   state: WebViewState;
   actions: ChromeActions;
@@ -280,6 +290,7 @@ function Toolbar({
   record: RecordView | null;
   profiling: boolean;
   grabActive: boolean;
+  adblock: AdblockView | null;
 }) {
   const rem = layout.rem;
   const stopIcon = useStopIcon(state.loading);
@@ -335,6 +346,7 @@ function Toolbar({
         url={state.url}
         theme={theme}
       />
+      {adblock && <AdblockPill view={adblock} rem={rem} theme={theme} actions={actions} />}
       <ToolbarButton
         icon="select"
         enabled
@@ -383,6 +395,74 @@ function ProfilingPill({ actions, rem, theme }: { actions: ChromeActions; rem: n
   );
 }
 
+
+// shared with the session so a drag on the thumb maps back to a scroll offset
+export function scrollHintGeometry(layout: ChromeLayout, portion: number) {
+  const width = Math.max(3, Math.round(layout.rem * 0.28));
+  const inset = Math.max(2, Math.round(layout.rem * 0.2));
+  const track = Math.max(1, layout.page.height - inset * 2);
+  const thumb = Math.max(Math.round(layout.rem * 1.2), Math.round(track * portion));
+  return { width, inset, track, thumb, top: layout.page.y + inset };
+}
+
+// a cue that rides the right edge of the page, like the terminal's own overlay scrollbar
+function ScrollHint({
+  view,
+  actions,
+  layout,
+  theme,
+}: {
+  view: ScrollView;
+  actions: ChromeActions;
+  layout: ChromeLayout;
+  theme: Theme;
+}) {
+  const { width, inset, track, thumb, top } = scrollHintGeometry(layout, view.portion);
+  const y = top + Math.round((track - thumb) * view.fraction);
+  const grab = Math.max(8, Math.round(layout.rem * 0.7));
+  const right = layout.page.x + layout.page.width;
+  return (
+    <>
+      <Box
+        style={{
+          position: "absolute",
+          inset: { top: y, left: right - grab },
+          width: grab,
+          height: thumb,
+        }}
+        // clickable so the page surface below does not swallow the press before the drag starts
+        onClick={() => {}}
+        onDrag={actions.scrollDrag}
+      />
+      <Box
+        style={{
+          position: "absolute",
+          inset: { top: y, left: right - width - inset },
+          width,
+          height: thumb,
+          cornerRadius: width / 2,
+          background: withAlpha(theme.fg, Math.round(110 * view.alpha)),
+        }}
+      />
+    </>
+  );
+}
+
+// hover only, so it reveals the cue near the edge without swallowing clicks on the page
+function ScrollEdge({ layout, actions }: { layout: ChromeLayout; actions: ChromeActions }) {
+  return (
+    <Box
+      style={{
+        position: "absolute",
+        inset: { top: layout.page.y, left: layout.page.x + layout.page.width - layout.rem },
+        width: layout.rem,
+        height: layout.page.height,
+      }}
+      onMouseEnter={() => actions.scrollHover(true)}
+      onMouseLeave={() => actions.scrollHover(false)}
+    />
+  );
+}
 
 function seamRadius(radius: number, dock: "bottom" | "right" | null, side: "page" | "devtools") {
   if (!dock) return radius;
@@ -551,6 +631,49 @@ function BrowserTabContents({
 }
 
 const TRANSPARENT_WINDOW = { transparent: true, backgroundColor: "#00000000" };
+
+function AdblockPill({
+  view,
+  rem,
+  theme,
+  actions,
+}: {
+  view: AdblockView;
+  rem: number;
+  theme: Theme;
+  actions: ChromeActions;
+}) {
+  const height = rem * 1.55;
+  const tint = view.active ? theme.accent : theme.disabled;
+  return (
+    <Box
+      style={{
+        height,
+        alignItems: "center",
+        gap: rem * 0.3,
+        padding: { left: rem * 0.5, right: view.blocked > 0 ? rem * 0.55 : rem * 0.5 },
+        margin: { left: rem * 0.3 },
+        cornerRadius: height / 2,
+        background: view.active ? mix(theme.bg, theme.accent, 0.14) : undefined,
+        hoverBackground: theme.hover,
+        flexShrink: 0,
+      }}
+      onClick={actions.adblockToggle}
+    >
+      <Icon
+        icon="shield"
+        size={rem * 0.95}
+        color={view.active ? tint : withAlpha(tint, 140)}
+        weight={2}
+      />
+      {view.blocked > 0 && (
+        <Text style={{ fontSize: rem * 0.75, color: tint, wrap: false, selectable: false }}>
+          {String(view.blocked)}
+        </Text>
+      )}
+    </Box>
+  );
+}
 
 const DIVIDER_ACTIVE = [58, 96, 168, 255] as const;
 const DIVIDER_GRIP = [118, 122, 132, 255] as const;

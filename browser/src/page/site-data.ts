@@ -1,7 +1,7 @@
 import { session } from "electron";
 
 // mirrors how the engine names persistent partitions, since it does not export that helper
-function partitionSession(partition: string | null) {
+export function partitionSession(partition: string | null) {
   if (!partition) return session.defaultSession;
   return session.fromPartition(
     partition.startsWith("persist:") ? partition : `persist:${partition}`,
