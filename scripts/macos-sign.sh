@@ -26,7 +26,8 @@ if [ -z "${MACOS_SIGN_P12:-}" ]; then
   for binary in "${LOOSE_BINARIES[@]}"; do
     codesign --force --sign - --timestamp=none "$binary"
   done
-  codesign --force --sign - --timestamp=none "$APP"
+  # the fuse write invalidates the framework's signature, so the nested code needs it too
+  codesign --force --deep --sign - --timestamp=none "$APP"
   echo "signed ad-hoc (MACOS_SIGN_P12 not set)"
   exit 0
 fi
