@@ -196,6 +196,7 @@ interface DaemonReply {
   session?: string;
   event?: string;
   code?: number;
+  resume?: string;
   sessions?: number;
 }
 
@@ -327,7 +328,9 @@ async function attachHere(argv: string[]): Promise<never> {
     throw new Error(reply.error ?? "daemon refused the session");
   }
   nextReply(socket, (message) => {
-    if (message.event === "closed") process.exit(message.code ?? 0);
+    if (message.event !== "closed") return;
+    if (message.resume) process.stderr.write(resumeHint(message.resume));
+    process.exit(message.code ?? 0);
   });
   socket.on("close", () => process.exit(0));
   socket.on("error", () => process.exit(1));
@@ -383,6 +386,21 @@ function takeSplitFlag(args: string[]): Direction | null {
   if (raw === undefined) return null;
   if (!isDirection(raw)) fail(`invalid --split ${raw} (right, left, down, up)`);
   return raw;
+}
+
+function resumeHint(id: string): string {
+  const grey = process.stderr.isTTY && !process.env.NO_COLOR ? "\x1b[38;5;245m" : "";
+  const plain = grey ? "\x1b[0m" : "";
+  return `\n${grey}Resume this session with:${plain}\n${grey}terminal-browser --resume ${id}${plain}\n`;
+}
+
+// the hint printed on exit uses the spaced form, the browser parses the =form
+function takeResumeFlag(args: string[]): void {
+  const at = args.indexOf("--resume");
+  if (at < 0) return;
+  const value = args[at + 1];
+  if (value === undefined || value.startsWith("-")) fail("--resume requires a session id");
+  args.splice(at, 2, `--resume=${value}`);
 }
 
 function takeSizeFlag(args: string[]): number | null {
@@ -474,6 +492,8 @@ async function requireGraphics(check: TerminalCheck) {
 
 const BROWSER_FLAGS = [
   "--allow-clipboard-read",
+  "--no-adblock",
+  "--resume=",
   "--ssh=",
   "--split-dir=",
   "--parent-tty=",
@@ -561,6 +581,7 @@ async function tryAdopt(args: string[], direction: Direction | null): Promise<bo
 
 async function openCommand(args: string[]) {
   requirePaneAccess();
+  takeResumeFlag(args);
   const owned = process.env.PIXEL_TTY ?? ownTtyPath();
   if (process.env.PIXEL_EMBED || (owned && findOwner(owned))) {
     rejectUnknownFlags(args);
