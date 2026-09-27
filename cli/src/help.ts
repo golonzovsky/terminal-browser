@@ -24,6 +24,9 @@ Options:
                         Lets websites read from clipboard.
   --transparent         [placeholder copy: Let the terminal show through pages that do not paint
                         a background. Persist it with terminal-browser config set window.transparent on]
+  --no-adblock          Turn off ad and tracker blocking for this browser
+  --resume <id>         Reopen the tabs from a previous session. The id is printed
+                        when that session exits, and is kept for a week.
   --no-merge            Do not open the terminal-browser instance as a tab in a neighbor terminal-browser
 
 
