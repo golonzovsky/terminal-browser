@@ -20,6 +20,10 @@ export const COMMANDS = {
   "page.reload": { label: "reload page", keys: platform(["cmd+r"], ["ctrl+r"]) },
   "page.back": { label: "back", keys: platform(["cmd+[", "ctrl+["], ["ctrl+["]) },
   "page.forward": { label: "forward", keys: platform(["cmd+]", "ctrl+]"], ["ctrl+]"]) },
+  "page.scroll.down": { label: "scroll half a screen down", keys: shared(["ctrl+d"]) },
+  "page.scroll.up": { label: "scroll half a screen up", keys: shared(["ctrl+u"]) },
+  "page.scroll.screen-down": { label: "scroll a screen down", keys: shared(["ctrl+f"]) },
+  "page.scroll.screen-up": { label: "scroll a screen up", keys: shared(["ctrl+b"]) },
   "devtools.toggle": {
     label: "toggle devtools",
     keys: platform(["cmd+shift+i", "f12"], ["ctrl+shift+i", "f12"]),

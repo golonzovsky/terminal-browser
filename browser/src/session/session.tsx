@@ -7,6 +7,7 @@ import { createRoot } from "@zenbu-labs/pixel";
 import type {
   DevtoolsDock,
   DownloadProgress,
+  DragEvent,
   EngineKeyEvent,
   Root,
   WebViewHandle,
@@ -41,7 +42,7 @@ import type { RecordTarget } from "../record/recorder";
 import { RecordSession } from "../record/session";
 import type { RecordActions } from "../record/types";
 import { Registry } from "../registry";
-import { Chrome } from "../ui/chrome";
+import { Chrome, scrollHintGeometry } from "../ui/chrome";
 import { ICONS } from "../ui/icons";
 import type {
   ChromeActions,
@@ -51,6 +52,7 @@ import type {
   NewTabSuggestion,
   PageMenuItem,
   PageMenuView,
+  ScrollView,
   TabActions,
   TabView,
 } from "../ui/types";
@@ -61,6 +63,7 @@ import type { PageContext } from "../pages/scheme";
 import { makeTheme } from "../ui/theme";
 import { fuzzyScore } from "./fuzzy";
 import { clampDevtoolsFraction, computeLayout, dividerFraction, recordBarHeight } from "./layout";
+import { attachPageScroll, onPageScroll, scrollPageBy, scrollPageTo } from "./page-scroll";
 import type { DevtoolsPlacement, SurfaceLayout } from "./layout";
 import { SUGGESTIONS_OFF } from "../config/search";
 import { SettingsManager } from "./settings";
@@ -152,6 +155,11 @@ function initialState(url: string): WebViewState {
   };
 }
 
+const SCROLL_HINT_MS = 900;
+// fades out over roughly 150ms once scrolling stops
+const SCROLL_FADE_MS = 16;
+const SCROLL_FADE_STEP = 0.11;
+
 class Session {
   private readonly ctx: SessionContext;
   private readonly terminal: Terminal | null;
@@ -209,7 +217,15 @@ class Session {
   private findOpen = false;
   private urlEditOpen = false;
   private palette: { query: string; index: number } | null = null;
+  private readonly scrollPages = new Set<number>();
   private newTab: NewTabState | null = null;
+  private scrollHint: { fraction: number; portion: number; alpha: number } | null = null;
+  private scrollSpan: { travel: number; portion: number } | null = null;
+  private scrollGrabbed = false;
+  private scrollGrabOffset = 0;
+  private scrollHovered = false;
+  private scrollHintTimer: ReturnType<typeof setTimeout> | null = null;
+  private scrollFade: ReturnType<typeof setInterval> | null = null;
   private zoomHud: number | null = null;
   private zoomHudTimer: ReturnType<typeof setTimeout> | null = null;
   private download: DownloadView | null = null;
@@ -249,6 +265,7 @@ class Session {
     const socksPort = Number(flagValue(this.argv, "--socks-port"));
     this.socksPort = Number.isInteger(socksPort) && socksPort > 0 ? socksPort : null;
     this.partition = sshTarget ? `ssh-${sshTarget.replace(/[^A-Za-z0-9@._-]/g, "-")}` : null;
+    attachPageScroll(this.partition);
     this.fallbackState = initialState(this.initialUrl());
     this.copyOnSelect = ctx.env.TERMINAL_BROWSER_COPY_ON_SELECT === "1";
     this.browserPreload = reactGrabPreloadPath(this.copyOnSelect);
@@ -455,7 +472,10 @@ class Session {
   }
 
   private readonly tabActions: TabActions = {
-    state: (id, state) => this.tabs.stateChanged(id, state),
+    state: (id, state) => {
+      this.tabs.stateChanged(id, state);
+      this.trackScroll(id);
+    },
     openWindow: (id, details) => this.tabs.openWindow(id, details),
     contextMenu: (id, params) => this.tabs.contextMenu(id, params),
     download: (progress) => this.showDownload(progress),
@@ -463,6 +483,18 @@ class Session {
       if (id === this.tabs.active?.id) this.activeRecord()?.pointerSample(event);
     },
   };
+
+  // the engine owns the webview, so the scroll reporter is hooked up from state changes
+  private trackScroll(id: number) {
+    const contents = this.tabs.get(id)?.ref.current?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    if (this.scrollPages.has(contents.id)) return;
+    this.scrollPages.add(contents.id);
+    onPageScroll(contents, (offset, size, viewport) =>
+      this.noteScroll(contents.id, offset, size, viewport),
+    );
+    contents.once("destroyed", () => this.scrollPages.delete(contents.id));
+  }
 
   private render() {
     if (!this.root || !this.layout) return;
@@ -482,6 +514,7 @@ class Session {
         }
         urlEdit={this.urlEditOpen}
         zoomHud={this.zoomHud}
+        scroll={this.scrollView()}
         download={this.download}
         toast={this.toast}
         palette={
@@ -578,6 +611,8 @@ class Session {
       if (action === "close") this.closeDevtools();
       else this.setDevtoolsDockSide(action === "dock-bottom" ? "bottom" : "right");
     },
+    scrollDrag: (event) => this.dragScroll(event),
+    scrollHover: (hovering) => this.scrollHoverChanged(hovering),
     pageMenuAction: (id) => this.runPageMenu(id),
     pageMenuClose: () => this.closePageMenu(),
     settings: this.settings.actions,
@@ -828,6 +863,18 @@ class Session {
       case "page.forward":
         handle?.forward();
         return;
+      case "page.scroll.down":
+        this.scrollPage(0.5);
+        return;
+      case "page.scroll.up":
+        this.scrollPage(-0.5);
+        return;
+      case "page.scroll.screen-down":
+        this.scrollPage(1);
+        return;
+      case "page.scroll.screen-up":
+        this.scrollPage(-1);
+        return;
       case "devtools.toggle":
         this.toggleDevtools();
         return;
@@ -877,6 +924,118 @@ class Session {
     this.uiZoom = Math.min(3, Math.max(0.5, Number(next.toFixed(3))));
     this.recalculateLayout();
     this.render();
+  }
+
+  // shows the moment you scroll, then fades once the scrolling stops
+  private noteScroll(contentsId: number, offset: number, size: number, viewport: number) {
+    const active = this.tabs.activeHandle?.webContents;
+    if (!active || active.isDestroyed() || active.id !== contentsId) return;
+    const portion = size > 0 ? Math.min(1, viewport / size) : 1;
+    if (portion >= 1) {
+      this.clearScrollHint();
+      return;
+    }
+    const travel = Math.max(1, size - viewport);
+    this.scrollSpan = { travel, portion };
+    const fraction = Math.min(1, Math.max(0, offset / travel));
+    const previous = this.scrollHint;
+    this.stopScrollFade();
+    this.scrollHint = { fraction, portion, alpha: 1 };
+    if (this.scrollHintTimer) clearTimeout(this.scrollHintTimer);
+    this.scrollHintTimer = setTimeout(() => {
+      this.scrollHintTimer = null;
+      if (!this.scrollHovered && !this.scrollGrabbed) this.fadeOutScrollHint();
+    }, SCROLL_HINT_MS);
+    const changed =
+      previous?.fraction !== fraction || previous?.portion !== portion || previous.alpha !== 1;
+    if (changed) this.render();
+  }
+
+  private fadeOutScrollHint() {
+    if (this.scrollFade || !this.scrollHint) return;
+    if (this.scrollHovered || this.scrollGrabbed) return;
+    this.scrollFade = setInterval(() => {
+      const hint = this.scrollHint;
+      if (!hint) {
+        this.stopScrollFade();
+        return;
+      }
+      const alpha = Math.max(0, hint.alpha - SCROLL_FADE_STEP);
+      this.scrollHint = { ...hint, alpha };
+      if (alpha === 0) this.stopScrollFade();
+      this.render();
+    }, SCROLL_FADE_MS);
+  }
+
+  private clearScrollHint() {
+    this.stopScrollFade();
+    if (this.scrollHintTimer) {
+      clearTimeout(this.scrollHintTimer);
+      this.scrollHintTimer = null;
+    }
+    if (!this.scrollHint) return;
+    this.scrollHint = null;
+    this.render();
+  }
+
+  private stopScrollFade() {
+    if (!this.scrollFade) return;
+    clearInterval(this.scrollFade);
+    this.scrollFade = null;
+  }
+
+  private scrollHoverChanged(hovering: boolean) {
+    if (this.scrollHovered === hovering) return;
+    this.scrollHovered = hovering;
+    if (hovering) {
+      this.stopScrollFade();
+      if (this.scrollHint) {
+        this.scrollHint = { ...this.scrollHint, alpha: 1 };
+        this.render();
+      }
+      return;
+    }
+    if (!this.scrollGrabbed && !this.scrollHintTimer) this.fadeOutScrollHint();
+  }
+
+  // dragging the thumb seeks the page directly rather than nudging it with wheel deltas
+  private dragScroll(event: DragEvent) {
+    const span = this.scrollSpan;
+    const layout = this.layout;
+    const contents = this.tabs.activeHandle?.webContents;
+    if (!span || !layout || !contents) return;
+    this.scrollGrabbed = event.phase !== "end";
+    const geometry = scrollHintGeometry(layout, span.portion);
+    const room = Math.max(1, geometry.track - geometry.thumb);
+    if (event.phase === "start") {
+      // hold onto where inside the thumb the press landed, so it does not jump under the cursor
+      const thumbTop = geometry.top + room * (this.scrollHint?.fraction ?? 0);
+      const within = event.y - thumbTop;
+      this.scrollGrabOffset =
+        within >= 0 && within <= geometry.thumb ? within : geometry.thumb / 2;
+    }
+    const top = event.y - this.scrollGrabOffset - geometry.top;
+    const fraction = Math.min(1, Math.max(0, top / room));
+    scrollPageTo(contents, fraction * span.travel);
+    if (event.phase === "end" && !this.scrollHovered) this.fadeOutScrollHint();
+  }
+
+  private scrollView(): ScrollView | null {
+    if (!this.scrollHint || this.scrollHint.alpha <= 0) return null;
+    return this.scrollHint;
+  }
+
+  // fraction of a viewport to travel, negative scrolls back up
+  private scrollPage(fraction: number) {
+    const contents = this.tabs.activeHandle?.webContents;
+    const surface = this.surfaceLayout;
+    if (!contents || contents.isDestroyed() || !surface) return;
+    const width = Math.max(1, Math.floor(surface.width / surface.scale));
+    const height = Math.max(1, Math.floor(surface.height / surface.scale));
+    scrollPageBy(contents, Math.round(height * fraction), {
+      x: Math.round(width / 2),
+      y: Math.round(height / 2),
+    });
   }
 
   private showZoomHud(factor: number) {
