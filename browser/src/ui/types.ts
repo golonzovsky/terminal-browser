@@ -57,6 +57,15 @@ export interface TabRow {
   capturing: MediaCapture;
 }
 
+export interface ScrollView {
+  /** 0 at the top of the page, 1 at the bottom */
+  fraction: number;
+  /** how much of the page fits on screen, sizes the thumb */
+  portion: number;
+  /** 0 while faded out, 1 while scrolling */
+  alpha: number;
+}
+
 export interface DownloadView {
   name: string;
   percent: number | null;
@@ -172,6 +181,8 @@ export interface ChromeActions {
   devtoolsDividerDrag(event: DragEvent): void;
   devtoolsAction(action: "close" | "dock-bottom" | "dock-right"): void;
   devtoolsDividerHover(hovering: boolean): void;
+  scrollDrag(event: DragEvent): void;
+  scrollHover(hovering: boolean): void;
   pageMenuAction(id: string): void;
   pageMenuClose(): void;
   pageMenuZoom(direction: ZoomDirection): void;
