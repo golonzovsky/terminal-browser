@@ -476,6 +476,7 @@ async function requireGraphics(check: TerminalCheck) {
 const BROWSER_FLAGS = [
   "--allow-clipboard-read",
   "--transparent",
+  "--no-adblock",
   "--ssh=",
   "--split-dir=",
   "--parent-tty=",
