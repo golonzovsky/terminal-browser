@@ -87,6 +87,7 @@ export interface PageMenuItem {
 export interface ClearDataView {
   checked: BrowsingDataKind[];
   clearing: boolean;
+  site: string | null;
 }
 
 export interface PageMenuView {
